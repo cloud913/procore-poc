@@ -66,29 +66,32 @@ namespace Worker
                     WaitTimeSeconds = 20
                 });
 
-                logger.LogInformation("Received {MessageCount} message(s) from SQS", response.Messages.Count);
-
-                // loop over the messages
-                foreach (var message in response.Messages)
+                using (logger.BeginScope("Beginning {RequestId}", response.ResponseMetadata.RequestId))
                 {
-                    // the message body will be a JSON string of the original request
-                    var salesforceMessage = JsonSerializer.Deserialize<SalesforceMessage>(message.Body);
+                    logger.LogInformation("Received {MessageCount} message(s) from SQS", response.Messages.Count);
 
-                    // this log is special. the {@SalesforceMessage} will cause the object to be serialized into the log (when using structured logging).
-                    // you should use the @ sparingly when logging, as serialization can be expensive
-                    logger.LogInformation("Processing salesforce message. {@SalesforceMessage}", salesforceMessage);
-
-                    // THIS IS WHERE YOU DO YOUR WORK
-                }
-
-                // when we are done we will delete all the messages from SQS. we may want to do this message by message, or track successes with a try/catch and only delete the successes
-                if (response.Messages.Count != 0)
-                {
-                    await sqsClient.DeleteMessageBatchAsync(new DeleteMessageBatchRequest
+                    // loop over the messages
+                    foreach (var message in response.Messages)
                     {
-                        Entries = response.Messages.Select((m, i) => new DeleteMessageBatchRequestEntry { Id = i.ToString("00"), ReceiptHandle = m.ReceiptHandle }).ToList(),
-                        QueueUrl = queueUrl
-                    });
+                        // the message body will be a JSON string of the original request
+                        var salesforceMessage = JsonSerializer.Deserialize<SalesforceMessage>(message.Body);
+
+                        // this log is special. the {@SalesforceMessage} will cause the object to be serialized into the log (when using structured logging).
+                        // you should use the @ sparingly when logging, as serialization can be expensive
+                        logger.LogInformation("Processing salesforce message. {@SalesforceMessage}", salesforceMessage);
+
+                        // THIS IS WHERE YOU DO YOUR WORK
+                    }
+
+                    // when we are done we will delete all the messages from SQS. we may want to do this message by message, or track successes with a try/catch and only delete the successes
+                    if (response.Messages.Count != 0)
+                    {
+                        await sqsClient.DeleteMessageBatchAsync(new DeleteMessageBatchRequest
+                        {
+                            Entries = response.Messages.Select((m, i) => new DeleteMessageBatchRequestEntry { Id = i.ToString("00"), ReceiptHandle = m.ReceiptHandle }).ToList(),
+                            QueueUrl = queueUrl
+                        });
+                    }
                 }
 
                 // we may not really need to do this delay, since there is a 20 second delay on the SQS call (if there are no messages), but it shows how you would do a delay if you need/want it
