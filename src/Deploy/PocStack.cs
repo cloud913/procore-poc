@@ -6,6 +6,7 @@ using Amazon.CDK.AWS.EC2;
 using Amazon.CDK.AWS.ECS;
 using Amazon.CDK.AWS.ECS.Patterns;
 using Amazon.CDK.AWS.IAM;
+using Amazon.CDK.AWS.Lambda;
 using Amazon.CDK.AWS.Route53;
 using Amazon.CDK.AWS.Route53.Targets;
 using Amazon.CDK.AWS.SQS;
@@ -32,34 +33,16 @@ namespace Poc
                 Validation = CertificateValidation.FromDns(hostedZone)
             });
 
-
-            // this is the API Gateway REST API that will be the endpoint for all your connectors and other services
-            // this is a regional endpoint, which means that it only exists in the region you deploy it to
-            var api = new RestApi(this, "Api", new RestApiProps
-            {
-                Deploy = true,
-                RestApiName = "PocApi",
-                Description = "This is a proof of concept",
-                DomainName = new DomainNameOptions
-                {
-                    Certificate = cert,
-                    DomainName = $"api.{domainName}",
-                    EndpointType = EndpointType.REGIONAL
-                },
-                DeployOptions = new StageOptions
-                {
-                    LoggingLevel = MethodLoggingLevel.ERROR
-                }
-            });
+            var restApi = CreateRestApi(this, cert, domainName);
 
             new RecordSet(this, "ApiRecordSet", new RecordSetProps
             {
                 RecordName = $"api.{domainName}",
-                Target = new RecordTarget(aliasTarget: new ApiGatewayDomain(api.DomainName)),
+                Target = new RecordTarget(aliasTarget: new ApiGatewayDomain(restApi.DomainName)),
                 Zone = hostedZone
             });
 
-            var workerQueue = CreateAndConnectWorkerSqsQueue(this, api);
+            var workerQueue = CreateAndConnectWorkerSqsQueue(this, restApi);
 
             var (vpc, cluster) = CreateVpcAndCluster(this);
 
@@ -75,7 +58,7 @@ namespace Poc
                 LogDriver = LogDriver.AwsLogs(new AwsLogDriverProps
                 {
                     LogRetention = Amazon.CDK.AWS.Logs.RetentionDays.TWO_WEEKS,
-                    StreamPrefix = "worker"
+                    StreamPrefix = "worker",
                 }),
                 MaxHealthyPercent = 200,
                 MinHealthyPercent = 100,
@@ -98,6 +81,73 @@ namespace Poc
                     { "QueueUrl", workerQueue.QueueUrl }
                 },
             });
+        }
+
+        /// <summary>
+        /// Creates the REST API (API Gateway) with a custom domain and custom authorizer
+        /// </summary>
+        /// <param name="stack">The stack.</param>
+        /// <param name="certificate">The certificate.</param>
+        /// <param name="domainName">The domain name.</param>
+        /// <returns>The rest api.</returns>
+        private static RestApi CreateRestApi(Stack stack, ICertificate certificate, string domainName)
+        {
+            // this role is used by the custom authorizer.
+            var authorizerRole = new Amazon.CDK.AWS.IAM.Role(stack, "AuthorizerRole", new RoleProps
+            {
+                AssumedBy = new ServicePrincipal("apigateway.amazonaws.com"),
+            });
+
+            // this is the lambda function that does the authorization.
+            var authorizerFunction = new Function(stack, "AuthorizerFunction", new FunctionProps
+            {
+                Code = Code.FromAsset("./src/Authorizer/bin/Release/netcoreapp3.1/publish"),
+                Handler = "Authorizer::Authorizer.Function::FunctionHandler",
+                Runtime = Runtime.DOTNET_CORE_3_1
+            });
+
+            // this is the custom lambda authorizer
+            var lambdaAuthorizer = new Amazon.CDK.AWS.APIGateway.RequestAuthorizer(stack, "Authorizer", new RequestAuthorizerProps
+            {
+                AssumeRole = authorizerRole,
+                Handler = authorizerFunction,
+                // this is what is used for caching. any request with the same Authorization header will return the cached value
+                // this can be anything from the header or query string, and all the values must be present
+                // this is optional if not caching
+                IdentitySources = new string[]
+                {
+                    "method.request.header.Authorization"
+                },
+                // the is how long an authorization is valid for.
+                ResultsCacheTtl = Duration.Minutes(15),
+            });
+
+            // this is the API Gateway REST API that will be the endpoint for all your connectors and other services
+            // this is a regional endpoint, which means that it only exists in the region you deploy it to
+            var api = new RestApi(stack, "Api", new RestApiProps
+            {
+                Deploy = true,
+                RestApiName = "PocApi",
+                Description = "This is a proof of concept",
+                DomainName = new DomainNameOptions
+                {
+                    Certificate = certificate,
+                    DomainName = $"api.{domainName}",
+                    EndpointType = EndpointType.REGIONAL
+                },
+                DeployOptions = new StageOptions
+                {
+                    LoggingLevel = MethodLoggingLevel.ERROR,
+                },
+                DefaultMethodOptions = new MethodOptions
+                {
+                    AuthorizationType = AuthorizationType.CUSTOM,
+                    // this connects the custom authorizeer to this API. you can specify the authorizer at the resource (i.e. path) or even method (i.e. POST/GET etc.) level
+                    Authorizer = lambdaAuthorizer,
+                }
+            });
+
+            return api;
         }
 
         /// <summary>
